@@ -164,6 +164,7 @@ jobs:
             '*_debian_trixie_arm64.tar.gz'
             '*_fedora_43_arm64.tar.gz'
             '*_fedora_44_arm64.tar.gz'
+            '*_fedora_45_arm64.tar.gz'
             '*_ubuntu_noble_arm64.tar.gz'
             '*_ubuntu_questing_arm64.tar.gz'
             '*_ubuntu_resolute_arm64.tar.gz'
@@ -197,8 +198,8 @@ jobs:
             find "$RUNNER_TEMP/mesa-version-0" -maxdepth 1 -type f \
               -name 'mesa-for-android-container_*' -print | sort
           )
-          [[ "${#latest_mesa_assets[@]}" -eq 7 ]] || {
-            echo "最新版应有 7 个 Mesa 资产，实际为 ${#latest_mesa_assets[@]} 个。" >&2
+          [[ "${#latest_mesa_assets[@]}" -eq 8 ]] || {
+            echo "最新版应有 8 个 Mesa 资产，实际为 ${#latest_mesa_assets[@]} 个。" >&2
             exit 1
           }
           media_driver_asset_file="$asset_dir/$MEDIA_DRIVER_ASSET"
@@ -231,7 +232,7 @@ jobs:
           while IFS= read -r version_tag; do
             version_dir="$RUNNER_TEMP/mesa-version-$version_index"
             mapfile -t version_assets < <(find "$version_dir" -maxdepth 1 -type f -name 'mesa-for-android-container_*' -print | sort)
-            ((${#version_assets[@]} > 0 && ${#version_assets[@]} <= 7)) || {
+            ((${#version_assets[@]} > 0 && ${#version_assets[@]} <= 8)) || {
               echo "版本 $version_tag 的资产数量无效。" >&2; exit 1;
             }
             for asset in "${version_assets[@]}"; do
