@@ -69,6 +69,7 @@ on:
           - Debian13
           - Fedora43
           - Fedora44
+          - Fedora45
           - Arch
       # —— Anland Niri ——
       build_niri:
@@ -3949,7 +3950,7 @@ jobs:
             all)
               targets='["ubuntu2604","Debian13","Fedora43","Fedora44","Arch"]'
               ;;
-            ubuntu2604|Debian13|Fedora43|Fedora44|Arch)
+            ubuntu2604|Debian13|Fedora43|Fedora44|Fedora45|Arch)
               targets="[\"$BUILD_TARGET_INPUT\"]"
               ;;
             *)
@@ -4042,7 +4043,7 @@ jobs:
               asset_arch=arm64
               archive_target=debian13
               ;;
-            Fedora43|Fedora44)
+            Fedora43|Fedora44|Fedora45)
               image="fedora:${BUILD_TARGET#Fedora}"
               script="producers/gnome/${BUILD_TARGET}_v5/build.sh"
               xwayland_patch=''
@@ -4117,7 +4118,7 @@ jobs:
                   fi
                   chown -R anland:anland /packages
                   ;;
-                Fedora43|Fedora44)
+                Fedora43|Fedora44|Fedora45)
                   dnf install -y --setopt=install_weak_deps=False git ca-certificates sudo python3 findutils util-linux
                   useradd -m -s /bin/bash anland
                   printf 'anland ALL=(root) NOPASSWD: /usr/bin/dnf\n' > /etc/sudoers.d/anland-dnf
@@ -4165,7 +4166,7 @@ jobs:
                   [ -n "$mutter_version" ] || { echo "无法解析 Mutter 版本" >&2; exit 1; }
                   printf '%s\n' "$mutter_version" > /packages/.mutter-version
                   ;;
-                Fedora43|Fedora44)
+                Fedora43|Fedora44|Fedora45)
                   runuser -u anland -- env ANLAND_INSTALL=0 ANLAND_STAGE=build ANLAND_WITH_DEPS=1 \
                     JOBS=4 WORKDIR=/packages/work ARTIFACTS_DIR=/packages/artifacts \
                     bash "/tmp/anland/$BUILD_SCRIPT"
@@ -4213,7 +4214,7 @@ jobs:
               esac
               case "$BUILD_TARGET" in
                 ubuntu2604|Debian13) xwayland_pattern='xwayland_*.deb' ;;
-                Fedora43|Fedora44) xwayland_pattern='xorg-x11-server-Xwayland-[0-9]*.rpm' ;;
+                Fedora43|Fedora44|Fedora45) xwayland_pattern='xorg-x11-server-Xwayland-[0-9]*.rpm' ;;
                 Arch) xwayland_pattern='xorg-xwayland-[0-9]*.pkg.tar.*' ;;
               esac
               xwayland_package="$(find /packages -type f -name "$xwayland_pattern" -print -quit)"
@@ -4351,7 +4352,7 @@ jobs:
           release_dir="$GITHUB_WORKSPACE/release-assets"
           mkdir -p "$release_dir"
           rolling_release_tag="anland-gnome-packages"
-          release_targets=(Debian13 ubuntu2604 Fedora43 Fedora44 Arch)
+          release_targets=(Debian13 ubuntu2604 Fedora43 Fedora44 Fedora45 Arch)
           declare -A asset_by_target=()
           declare -A asset_time_by_target=()
           declare -A asset_source_by_target=()
@@ -4366,6 +4367,7 @@ jobs:
               Arch) printf '%s\n' 'anland-gnome-arch-mutter-' ;;
               Fedora43) printf '%s\n' 'anland-gnome-fedora43-mutter-' ;;
               Fedora44) printf '%s\n' 'anland-gnome-fedora44-mutter-' ;;
+              Fedora45) printf '%s\n' 'anland-gnome-fedora45-mutter-' ;;
               *) echo "不支持的构建目标：$1" >&2; return 1 ;;
             esac
           }
@@ -4377,6 +4379,7 @@ jobs:
               Arch) printf '%s\n' 'Arch Linux ARM' ;;
               Fedora43) printf '%s\n' 'Fedora 43' ;;
               Fedora44) printf '%s\n' 'Fedora 44' ;;
+              Fedora45) printf '%s\n' 'Fedora 45' ;;
               *) echo "不支持的构建目标：$1" >&2; return 1 ;;
             esac
           }
@@ -4384,7 +4387,7 @@ jobs:
           asset_arch_for_target() {
             case "$1" in
               Debian13|ubuntu2604) printf '%s\n' 'arm64' ;;
-              Arch|Fedora43|Fedora44) printf '%s\n' 'aarch64' ;;
+              Arch|Fedora43|Fedora44|Fedora45) printf '%s\n' 'aarch64' ;;
               *) echo "不支持的构建目标：$1" >&2; return 1 ;;
             esac
           }
@@ -4396,6 +4399,7 @@ jobs:
               Arch) printf '%s\n' 'arch' ;;
               Fedora43) printf '%s\n' 'fedora43' ;;
               Fedora44) printf '%s\n' 'fedora44' ;;
+              Fedora45) printf '%s\n' 'fedora45' ;;
               *) echo "不支持的构建目标：$1" >&2; return 1 ;;
             esac
           }
@@ -4497,7 +4501,7 @@ jobs:
             Debian13)
               selected_prefix="$(asset_prefix_for_target Debian13)"
               ;;
-            Fedora43|Fedora44|Arch)
+            Fedora43|Fedora44|Fedora45|Arch)
               selected_prefix="$(asset_prefix_for_target "$BUILD_TARGET_INPUT")"
               ;;
             *)
@@ -4710,7 +4714,7 @@ jobs:
             case "$target" in
               Debian13) legacy='anland-gnome-debian13-arm64.tar.gz' ;;
               ubuntu2604) legacy='anland-gnome-ubuntu2604-arm64.tar.gz' ;;
-              Arch|Fedora43|Fedora44) legacy='__no_legacy_asset__' ;;
+              Arch|Fedora43|Fedora44|Fedora45) legacy='__no_legacy_asset__' ;;
               *) return 1 ;;
             esac
             case "$name" in

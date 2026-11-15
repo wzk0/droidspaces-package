@@ -438,9 +438,16 @@ detect_target() {
                     ARCHIVE_SUFFIX="-aarch64.tar.gz"
                     ARCHIVE_TARGET="fedora44"
                     ;;
+                fedora:45*)
+                    TARGET="Fedora 45"
+                    PACKAGE_TYPE="rpm"
+                    ARCHIVE_PREFIX="anland-gnome-fedora45-mutter-"
+                    ARCHIVE_SUFFIX="-aarch64.tar.gz"
+                    ARCHIVE_TARGET="fedora45"
+                    ;;
                 *)
-                    die "不支持当前系统 ${system_name}。仅支持 Debian 13、Ubuntu 26.04、Fedora 43/44、Arch Linux。" \
-                        "Unsupported system: ${system_name}. Supported systems are Debian 13, Ubuntu 26.04, Fedora 43/44, and Arch Linux."
+                    die "不支持当前系统 ${system_name}。仅支持 Debian 13、Ubuntu 26.04、Fedora 43/44/45、Arch Linux。" \
+                        "Unsupported system: ${system_name}. Supported systems are Debian 13, Ubuntu 26.04, Fedora 43/44/45, and Arch Linux."
                     ;;
             esac
             ;;
