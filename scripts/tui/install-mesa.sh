@@ -7,7 +7,8 @@ set -euo pipefail
 # 安装面向 Android 容器的 ARM64 Mesa 构建。
 # 同时安装 droidspaces-media-decode 发布的视频编解码 VA-API 驱动。
 # 根据 /etc/os-release 选择 Mesa 归档格式和包管理器。
-readonly RELEASE_REPOSITORY="Goldzxcbug/droidspaces-package"
+# 允许指向自行构建的包仓库（例如自建 fedora45 资产的分发 Release）。
+readonly RELEASE_REPOSITORY="${ANLAND_MESA_RELEASE_REPOSITORY:-Goldzxcbug/droidspaces-package}"
 readonly CNB_RELEASE_REPOSITORY="goldzxcbug/droidspaces-package"
 readonly DISTRIBUTION_TAG="mesa-for-android-container"
 readonly DISTRIBUTION_MANIFEST_NAME="mesa-distribution-manifest"
