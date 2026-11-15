@@ -1,36 +1,39 @@
-# Droidspaces 软件包构建
+# Droidspaces 软件包构建（Fedora 45 GNOME）
 
-本仓库将 Anland 的发行版构建配方打包为可安装的 ARM64 软件包，并发布安装器、平台清单与国内镜像。
+为 [Droidspaces RootFS](../) 构建 **Fedora 45 + GNOME（Anland Wayland）** 所需的 ARM64 预编译包，共两条流水线。
 
-| 组件 | Ubuntu 26.04 | Debian 13 | Fedora 43/44 | Arch Linux ARM | 安装器 |
-| --- | --- | --- | --- | --- | --- |
-| KDE / KWin | ✓ | ✓ | ✓ | ✓ | `install-anland-kde.sh` |
-| GNOME / Mutter | ✓ | ✓ | ✓ | ✓ | `install-anland-gnome.sh` |
-| Niri | ✓ | ✓ | ✓ | ✓ | `install-anland-niri.sh` |
-| Hyprland | ✓ | ✓ | ✓ | ✓ | `install-anland-hyprland.sh` |
-| Mango | ✓ | ✓ | ✓ | ✓ | `install-anland-mango.sh` |
-| Denial | ✓ | ✓ | ✓ | ✓ | `install-anland-denial.sh` |
-| Anland Next session | ✓ | ✓ | ✓ | ✓ | `install-anland-next.sh` |
+本仓库只保留这两条流水线；KDE、Niri、Hyprland、Mango、Denial、Anland Next、systemd 257、Hangover Wine、TUI 发布的工作流与脚本已移除。
 
-构建使用 `ubuntu-24.04-arm` 原生 ARM64 runner，在相应发行版容器中编译。桌面包包含配套 patched Xwayland；依赖由目标系统的 apt、dnf 或 pacman 管理。
+## 1. Anland GNOME（Mutter + Xwayland）
 
-## 运行构建
+工作流：`.github/workflows/build-anland-packages.yml`
 
-在 GitHub Actions 中选择：
+- 输入：`anland_repo`（默认 `https://github.com/wzk0/anland.git`）、`anland_ref`（默认 `legacy`）、`gnome_target`（`Fedora45`）、`publish_cnb`（默认关闭）
+- 在原生 ARM64 runner 上用 `fedora:45` 容器重建 Fedora 当前 Mutter SRPM（51.x），套用 Anland 补丁并重打 Xwayland
+- 产物发布到滚动 Release **`anland-gnome-packages`**：
+  - `anland-gnome-fedora45-mutter-<版本>-aarch64.tar.gz`
+  - `anland-gnome-manifest`（平台 → 资产映射，含 sha256）
+  - `install-anland-gnome.sh`
 
-- **构建 Anland 软件包**：在同一个工作流中分别开关 KDE、GNOME、Niri、Hyprland、Mango、Denial 和 Next session；每个组件都有独立的发行版目标。前六种组件共用源码仓库和 ref，Next session 的独立源码参数放在最后。
-- **test**：手动运行主构建流程，默认使用个人 Anland 仓库，Next session 默认读取其 `main`。
+配方来源：[`wzk0/anland`](https://github.com/wzk0/anland) 的 `producers/gnome/Fedora45_v5`
+（Mutter 补丁采用与 mutter 51 对齐的版本；`rpm -K` 使用 `--nosignature`，因为 Fedora 45 的
+`%_pkgverify_level` 为 `all`，未签名的本地产物会被判签名失败）。
 
-主工作流每天北京时间 08:00 构建全部组件。每次先将 Anland ref 固定为一个提交，再启动独立的平台任务。`all` 中失败的平台沿用固定 Release 的旧包；指定单平台失败时不更新该 Release；没有新包时不会重新发布。
+## 2. Mesa 分发
 
-KDE、GNOME、Niri、Hyprland、Mango 和 Denial 共用 `anland_repo` 与 `anland_ref`，默认读取 `https://github.com/Goldzxcbug/anland.git` 的 `Gold` 分支。Next session 单独使用 `session_repo` 与 `session_ref`，主工作流默认读取 `https://github.com/SuperTurtleDev/anland.git` 的 `main` 分支。可以在手动运行时分别覆盖这两组源码参数；`test` 工作流也采用相同的分组方式。
+工作流：`.github/workflows/distribute-mesa.yml`
 
-**本地源码必须先进入远端提交。** `/home/gold/文档/仓库/anland` 中新增的 producer 配方、`producers/common/` 以及共享源码修改，只有提交并推送到所选 ref 后才会进入 Actions 构建。工作流会检查提交中的配方；本地存在文件不代表远端已经可用。
+把上游 [`lfdevs/mesa-for-android-container`](https://github.com/lfdevs/mesa-for-android-container)
+的正式 Release 资产重新分发到本仓库的固定 Release **`mesa-for-android-container`**，共 8 个平台
+（archlinux / debian_trixie / fedora_43 / fedora_44 / **fedora_45** / ubuntu_noble / ubuntu_questing / ubuntu_resolute），
+并附带 `msm_drm_drv_video.so` 视频解码驱动、`install-mesa.sh` 以及 `mesa-versions-manifest`。
 
-## 安装与发布
+上游最新 Release 已包含 `fedora_45` 资产，直接运行即可；上游发新版本时手动重跑一次。
 
-固定 Release 标签为 `anland-<组件>-packages`，Next session 使用 `anland-session-packages`。每个 Release 都带对应的自包含 `install-anland-*.sh`，下载后可直接运行；`-1`、`-2`、`-3` 分别选择 GitHub、代理和 CNB，`--uninstall` 用于卸载。安装器以 KDE 的下载、校验、提权和包管理流程为基准，保留各组件的软件包及会话差异。
+## 运行方式
 
-桌面归档目录统一为 `anland-<组件>-packages/<小写平台>/`；`anland-<组件>-manifest` 将平台映射到资产。KDE/GNOME 使用清单中的 `<平台>_sha256`；Niri、Hyprland、Mango、Denial 还发布 `SHA256SUMS`。Next session 直接发布各发行版原生包与 `SHA256SUMS`。沿用的旧包保留自身构建信息。
+Actions → 选择对应工作流 → `Run workflow`（分支必须是 `main`）。两者相互独立：
 
-安装器同时随 [Droidspaces TUI](scripts/tui/README.md) 发布。CNB 同步需要仓库 Secret `CNB_TOKEN` 和 Variable `CNB_REPO`，手动构建可关闭同步。
+1. 先跑 **构建 Anland GNOME（Fedora 45）** 拿到 Mutter 包；
+2. 需要 GPU 支持时跑 **分发 Mesa for Android Container**；
+3. 然后在 Droidspaces RootFS 仓库里构建镜像，把 `wayland_package_repository` 指向本仓库。
