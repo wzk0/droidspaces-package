@@ -15,7 +15,7 @@
   - `anland-gnome-manifest`（平台 → 资产映射，含 sha256）
   - `install-anland-gnome.sh`
 
-配方来源：[`wzk0/anland`](https://github.com/wzk0/anland) 的 `producers/gnome/Fedora45_v5`
+配方来源：`wzk0/anland` 的 `producers/gnome/Fedora45_v5`（该 fork 可删除，配方已备份为本仓库的 `anland-fedora45-recipe.patch`）
 （Mutter 补丁采用与 mutter 51 对齐的版本；`rpm -K` 使用 `--nosignature`，因为 Fedora 45 的
 `%_pkgverify_level` 为 `all`，未签名的本地产物会被判签名失败）。
 
@@ -29,6 +29,22 @@
 并附带 `msm_drm_drv_video.so` 视频解码驱动、`install-mesa.sh` 以及 `mesa-versions-manifest`。
 
 上游最新 Release 已包含 `fedora_45` 资产，直接运行即可；上游发新版本时手动重跑一次。
+
+## 重建 Anland 包（配方备份）
+
+Anland 配方不是本仓库的代码，而是打在 [SuperTurtleDev/anland](https://github.com/SuperTurtleDev/anland)
+`legacy` 分支上的两个提交。仓库里备份为 `anland-fedora45-recipe.patch`，任何人可在没有
+`wzk0/anland` 的情况下复原：
+
+```bash
+git clone -b legacy https://github.com/SuperTurtleDev/anland.git my-anland
+cd my-anland
+git am /path/to/anland-fedora45-recipe.patch
+# 推到自己账号后，用 Actions 里的 anland_repo / anland_ref 指过去
+```
+
+配方内容：`producers/gnome/Fedora45_v5`（复制 Fedora44_v5，版本门改 45，Mutter 补丁换成与
+mutter 51 对齐的版本，spec 注入 `gnome-shell >= 51, < 52`）+ `rpm -K --nosignature` 修复。
 
 ## 运行方式
 

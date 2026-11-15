@@ -1,0 +1,1280 @@
+From 59d9ec8fd2d0b3758f3efc674f04078b7e79d5f2 Mon Sep 17 00:00:00 2001
+From: thdbd <thdbd@localhost>
+Date: Sun, 15 Nov 2026 16:10:51 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat(gnome):=20=E6=96=B0=E5=A2=9E=20Fedora?=
+ =?UTF-8?q?=2045=20=E6=9E=84=E5=BB=BA=E9=85=8D=E6=96=B9=20Fedora45=5Fv5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 复制 Fedora44_v5，版本门/缓存目录/构建记录改为 Fedora 45
+- Mutter 补丁改用与 mutter 51 对齐的版本（来源 Arch_v5/mutter.patch，
+  对 Fedora 45 的 mutter 51.1 源码 patch --dry-run 零失败）；同步 sources.json 校验值
+- RPM %description 注入的运行时依赖改为 gnome-shell >= 51, < 52
+- Xwayland 补丁复用 kde/ubuntu2604_v5/xwayland.patch（对 Fedora 45 的
+  xorg-x11-server-Xwayland 24.1.15 零失败）
+- startup.sh 文案 GNOME50 -> GNOME51
+---
+ producers/gnome/Fedora45_v5/build.sh          | 182 ++++
+ producers/gnome/Fedora45_v5/mutter            |   1 +
+ .../gnome/Fedora45_v5/mutter-fedora45.patch   | 938 ++++++++++++++++++
+ producers/gnome/Fedora45_v5/mutter.patch      |   1 +
+ producers/gnome/Fedora45_v5/sources.json      |   8 +
+ producers/gnome/Fedora45_v5/startup.sh        |  33 +
+ producers/gnome/Fedora45_v5/xwayland.patch    |   1 +
+ 7 files changed, 1164 insertions(+)
+ create mode 100644 producers/gnome/Fedora45_v5/build.sh
+ create mode 120000 producers/gnome/Fedora45_v5/mutter
+ create mode 100644 producers/gnome/Fedora45_v5/mutter-fedora45.patch
+ create mode 120000 producers/gnome/Fedora45_v5/mutter.patch
+ create mode 100644 producers/gnome/Fedora45_v5/sources.json
+ create mode 100644 producers/gnome/Fedora45_v5/startup.sh
+ create mode 120000 producers/gnome/Fedora45_v5/xwayland.patch
+
+diff --git a/producers/gnome/Fedora45_v5/build.sh b/producers/gnome/Fedora45_v5/build.sh
+new file mode 100644
+index 0000000..694a183
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/build.sh
+@@ -0,0 +1,182 @@
++#!/usr/bin/env bash
++# Fedora 45 aarch64: rebuild the current Fedora Mutter SRPM.
++# ANLAND_STAGE=check|prepare|build ANLAND_WITH_DEPS=1 JOBS=4 ANLAND_INSTALL=0
++set -uo pipefail
++SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
++# Fedora build/package functions are local to this WM recipe.
++fedora_die() { printf 'fedora-build: %s\n' "$*" >&2; exit 1; }
++
++fedora_run() { "$@" || fedora_die "failed: $*"; }
++
++fedora_preflight() {
++    local ID VERSION_ID
++    source /etc/os-release || fedora_die 'cannot identify distribution'
++    [[ $ID == fedora && $VERSION_ID == 45 && $(uname -m) == aarch64 ]] ||
++        fedora_die 'requires native Fedora 45 aarch64'
++    [[ $(id -u) != 0 ]] || fedora_die 'compile as an ordinary user'
++    JOBS=${JOBS:-4}
++    [[ $JOBS =~ ^[1-9][0-9]*$ ]] || fedora_die 'JOBS must be a positive integer'
++    local flag
++    for flag in ANLAND_INSTALL ANLAND_WITH_DEPS ANLAND_OFFLINE; do
++        printf -v "$flag" '%s' "${!flag:-0}"
++        [[ ${!flag} =~ ^[01]$ ]] || fedora_die "$flag must be 0 or 1"
++    done
++    ANLAND_STAGE=${ANLAND_STAGE:-build}
++    case $ANLAND_STAGE in check|prepare|build) ;; *) fedora_die 'ANLAND_STAGE must be check, prepare or build' ;; esac
++    [[ $ANLAND_OFFLINE != 1 || $ANLAND_WITH_DEPS != 1 ]] || fedora_die 'offline dependency installation is not supported'
++    [[ $ANLAND_STAGE == build || $ANLAND_INSTALL == 0 ]] || fedora_die 'installation requires the build stage'
++}
++
++fedora_initialize() {
++    fedora_preflight
++    ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd -P) || fedora_die 'repository root'
++    source "$ROOT/producers/common/fedora-latest-srpm.sh"
++    WORKDIR=$(realpath -m -- "${WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/anland-$1-fedora45}") || fedora_die 'cache path'
++    ARTIFACTS_DIR=$(realpath -m -- "${ARTIFACTS_DIR:-${ARTIFACTS:-$SCRIPT_DIR/artifacts}}") || fedora_die 'artifact path'
++    [[ $WORKDIR != / && $WORKDIR != "$HOME" && $WORKDIR != "$ROOT" && $WORKDIR != "$ROOT/"* ]] || fedora_die 'WORKDIR must be a separate cache'
++    [[ $ARTIFACTS_DIR != / && $ARTIFACTS_DIR != "$HOME" && $ARTIFACTS_DIR != "$ROOT" && $ARTIFACTS_DIR != "$WORKDIR" ]] || fedora_die 'unsafe artifact directory'
++    [[ ! -L $ARTIFACTS_DIR ]] || fedora_die 'artifacts must not be a symlink'
++    fedora_run mkdir -p "$WORKDIR" "$ARTIFACTS_DIR"
++    exec 7>"$WORKDIR/fedora-build.lock" || fedora_die 'cache lock'
++    flock -n 7 || fedora_die 'cache already in use'
++    exec 6>"$ARTIFACTS_DIR/.fedora-build.lock" || fedora_die 'artifact lock'
++    flock -n 6 || fedora_die 'artifacts already in use'
++    export LANG=C.UTF-8 LC_ALL=C.UTF-8 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat
++    export CCACHE_DIR="$WORKDIR/ccache" CCACHE_BASEDIR="$WORKDIR"
++    # Do not inherit another WM's staged libraries or SDK.
++    unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR CMAKE_PREFIX_PATH LD_LIBRARY_PATH DESTDIR
++    FEDORA_INPUT_ID=$(python3 - "$ROOT" "$SCRIPT_DIR" <<'PY'
++import hashlib, pathlib, sys
++root, recipe = map(pathlib.Path, sys.argv[1:])
++h = hashlib.sha256()
++paths = [recipe/'build.sh']
++for folder in (recipe, recipe.parent/'anland_backend', root/'libdisplay_producer', root/'common'):
++    paths += [p for p in folder.rglob('*') if p.is_file() and 'artifacts' not in p.parts]
++for p in sorted(set(paths)):
++    h.update(str(p.relative_to(root)).encode()+b'\0'+p.read_bytes())
++print(h.hexdigest())
++PY
++    ) || fedora_die 'input fingerprint'
++    packages=()
++}
++
++fedora_dependencies() {
++    [[ $ANLAND_WITH_DEPS == 1 && $ANLAND_STAGE != check ]] || return 0
++    local dnf_download_plugin=dnf-plugins-core
++    if command -v dnf5 >/dev/null 2>&1; then dnf_download_plugin=dnf5-plugins; fi
++    # Preserve Mesa/package holds. Do not enable COPR or change global DNF config.
++    fedora_run sudo dnf --setopt=install_weak_deps=False install -y \
++        gcc gcc-c++ make cmake meson ninja-build pkgconf-pkg-config ccache python3 \
++        git-core curl ca-certificates patch tar xz unzip zip file binutils \
++        rpm-build rpmdevtools "$dnf_download_plugin" cpio util-linux findutils diffutils "$@"
++}
++
++fedora_download() {
++    local file=$1 sha=$2 url=$3
++    [[ $sha =~ ^[0-9a-f]{64}$ ]] || fedora_die "invalid checksum: $file"
++    if printf '%s  %s\n' "$sha" "$file" | sha256sum -c --status - 2>/dev/null; then return; fi
++    [[ $ANLAND_OFFLINE == 0 ]] || fedora_die "offline source absent or corrupt: $file"
++    fedora_run mkdir -p "$(dirname -- "$file")"
++    fedora_run curl -fL --retry 3 --connect-timeout 30 -o "$file.part" "$url"
++    printf '%s  %s\n' "$sha" "$file.part" | sha256sum -c - || fedora_die "source checksum: $file"
++    fedora_run mv -- "$file.part" "$file"
++}
++
++fedora_reuse() {
++    [[ -d $1 ]] || return 1
++    [[ -f $1/.anland-source-identity && $(cat "$1/.anland-source-identity") == "$FEDORA_INPUT_ID" ]] ||
++        fedora_die "stale/unmanaged source preserved: $1; refresh it explicitly"
++}
++
++fedora_seal() { printf '%s\n' "$FEDORA_INPUT_ID" > "$1/.anland-source-identity" || fedora_die 'cannot record source identity'; }
++
++fedora_publish_rpm() {
++    local file=$1 destination="$ARTIFACTS_DIR/${1##*/}" architecture
++    architecture=$(rpm -qp --qf '%{ARCH}' "$file") || fedora_die 'RPM architecture'
++    [[ $architecture == aarch64 || $architecture == noarch ]] || fedora_die "wrong architecture: $file"
++    fedora_run rpm -K "$file"
++    fedora_run rpm -qpl "$file" >/dev/null
++    [[ ! -e $destination.sig && ! -L $destination.sig ]] || cmp -s "$file" "$destination" || fedora_die "existing signature preserved: $destination.sig"
++    fedora_run cp -p -- "$file" "$destination"
++    packages+=("$destination")
++}
++
++fedora_srpm_build() {
++    local top=$FEDORA_SRPM_TOP spec=$FEDORA_SRPM_SPEC marker file found=0
++    if [[ $ANLAND_WITH_DEPS == 1 ]]; then
++        fedora_run sudo dnf --setopt=install_weak_deps=False builddep -y "$spec"
++    fi
++    marker=$(mktemp "$top/build-start.XXXXXX") || fedora_die 'SRPM build marker'
++    # Keep Xwayland/Mutter isolated from the other WM's private SDK.
++    fedora_run env -u PKG_CONFIG_PATH -u PKG_CONFIG_LIBDIR -u CMAKE_PREFIX_PATH \
++        -u LD_LIBRARY_PATH -u DESTDIR -u CFLAGS -u CXXFLAGS -u LDFLAGS \
++        rpmbuild -bb --define "_topdir $top" --define "_smp_build_ncpus $JOBS" "$spec"
++    while IFS= read -r file; do fedora_publish_rpm "$file"; found=$((found + 1));
++    done < <(find "$top/RPMS" -type f -name '*.rpm' ! -name '*debug*' ! -name '*-tests-*' ! -name '*-devkit-*' -newer "$marker")
++    [[ $found -gt 0 ]] || fedora_die 'no current SRPM build output'
++    fedora_run rm -f -- "$marker"
++}
++
++fedora_xwayland() {
++    # Every WM keeps its Xwayland inputs alongside its own distro recipe.
++    fedora_srpm_prepare xorg-x11-server-Xwayland "$SCRIPT_DIR/xwayland.patch"
++    [[ $ANLAND_STAGE != build ]] || fedora_srpm_build
++}
++
++fedora_finish() {
++    [[ ${#packages[@]} -gt 0 ]] || fedora_die 'empty Fedora package set'
++    printf '%s\n' "${packages[@]##*/}" > "$WORKDIR/packages.list" || fedora_die 'package list'
++    (cd "$ARTIFACTS_DIR" && sha256sum -- "${packages[@]##*/}" > "$WORKDIR/SHA256SUMS" && sha256sum -c "$WORKDIR/SHA256SUMS") || fedora_die 'package checksums'
++    python3 - "$ROOT" "$FEDORA_INPUT_ID" "$WORKDIR/build-inputs.json" <<'PY' || fedora_die 'build record'
++import json,subprocess,sys
++root,identity,out=sys.argv[1:]
++record={'distribution':'fedora45','architecture':'aarch64','input_sha256':identity,
++ 'anland_revision':subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip(),
++ 'graphical_test':False}
++open(out,'w').write(json.dumps(record,indent=2)+'\n')
++PY
++    if [[ $ANLAND_INSTALL == 1 ]]; then
++        # Scoped only to this requested transaction; never rewrite dnf.conf.
++        fedora_run sudo dnf --setopt=excludepkgs= install -y "${packages[@]}"
++    fi
++    printf '\nFedora RPMs: %s\nNo desktop/session was started or restarted. Graphical validation NOT performed.\n' "$ARTIFACTS_DIR"
++}
++
++[[ $# == 0 ]] || fedora_die 'use environment variables, not arguments'
++fedora_initialize gnome
++fedora_dependencies pipewire-devel
++if [[ $ANLAND_STAGE == check ]]; then
++    printf 'FEDORA45_RECIPE_OK gnome (current Mutter SRPM; no compilation or graphical test)\n'; exit 0
++fi
++mutter_patch_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["patches"]["mutter.patch"])' \
++    "$SCRIPT_DIR/sources.json") || fedora_die 'cannot read Mutter patch checksum'
++printf '%s  %s\n' "$mutter_patch_sha" "$SCRIPT_DIR/mutter.patch" | sha256sum -c --status - ||
++    fedora_die 'Mutter patch checksum differs from sources.json'
++fedora_srpm_prepare mutter "$SCRIPT_DIR/mutter.patch" \
++    "$SCRIPT_DIR/mutter" . '-Danland=enabled'
++if [[ $ANLAND_STAGE == prepare ]]; then
++    fedora_xwayland
++    printf 'FEDORA45_PREPARED gnome\n'; exit 0
++fi
++# The upstream distro spec retains its introspection/data/runtime packages.
++# No GNOME Shell ABI spoofing, cross-major replacement or service manipulation.
++python3 - "$FEDORA_SRPM_SPEC" <<'PY' || fedora_die 'cannot add Fedora launcher'
++from pathlib import Path
++import re, sys
++p=Path(sys.argv[1]); s=p.read_text()
++if 'Source99: anland-startup.sh' not in s:
++    if 'Source99:' in s: raise SystemExit('Source99 collision')
++    s=s.replace('%description\n','Source99: anland-startup.sh\n\n%description\n',1)
++    s=s.replace('%meson_install\n','%meson_install\ninstall -Dm755 %{SOURCE99} %{buildroot}%{_bindir}/gnome-anland\n',1)
++    s=s.replace('%files -f %{name}.lang\n','%files -f %{name}.lang\n%{_bindir}/gnome-anland\n',1)
++    # Complete session components come from Fedora's matching GNOME51 packages.
++    s, count = re.subn(r'^Requires:[ \t]+dbus[ \t]*$',
++                       'Requires: dbus\nRequires: gnome-shell >= 51, gnome-shell < 52, gnome-session, bash, procps-ng, util-linux',
++                       s, count=1, flags=re.M)
++    if count != 1: raise SystemExit('expected one native dbus runtime requirement')
++    p.write_text(s)
++PY
++fedora_run cp "$SCRIPT_DIR/startup.sh" "$FEDORA_SRPM_TOP/SOURCES/anland-startup.sh"
++fedora_srpm_build
++fedora_xwayland
++fedora_finish
+diff --git a/producers/gnome/Fedora45_v5/mutter b/producers/gnome/Fedora45_v5/mutter
+new file mode 120000
+index 0000000..802b828
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/mutter
+@@ -0,0 +1 @@
++../anland_backend/mutter
+\ No newline at end of file
+diff --git a/producers/gnome/Fedora45_v5/mutter-fedora45.patch b/producers/gnome/Fedora45_v5/mutter-fedora45.patch
+new file mode 100644
+index 0000000..e8b0054
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/mutter-fedora45.patch
+@@ -0,0 +1,938 @@
++diff --git a/clutter/clutter/clutter-stage-view-private.h b/clutter/clutter/clutter-stage-view-private.h
++index 6e3fde0..bb6976b 100644
++--- a/clutter/clutter/clutter-stage-view-private.h
+++++ b/clutter/clutter/clutter-stage-view-private.h
++@@ -21,6 +21,11 @@
++ #include "clutter/clutter-types.h"
++ #include "mtk/mtk.h"
++
+++typedef gboolean (* MetaStageViewPresentFunc) (ClutterStageView *view,
+++                                                ClutterFrame     *frame,
+++                                                int64_t           global_frame_counter,
+++                                                gpointer          user_data);
+++
++ CLUTTER_EXPORT
++ void clutter_stage_view_after_paint (ClutterStageView *view,
++                                      MtkRegion        *redraw_clip);
++@@ -46,6 +51,20 @@ void clutter_stage_view_invalidate_projection (ClutterStageView *view);
++ void clutter_stage_view_set_projection (ClutterStageView        *view,
++                                         const graphene_matrix_t *matrix);
++
+++CLUTTER_EXPORT
+++void clutter_stage_view_replace_framebuffer (ClutterStageView *view,
+++                                              CoglFramebuffer  *framebuffer);
+++
+++CLUTTER_EXPORT
+++void clutter_stage_view_set_present_func (ClutterStageView        *view,
+++                                           MetaStageViewPresentFunc present_func,
+++                                           gpointer                 user_data);
+++
+++CLUTTER_EXPORT
+++gboolean clutter_stage_view_present (ClutterStageView *view,
+++                                      ClutterFrame     *frame,
+++                                      int64_t           global_frame_counter);
+++
++ CLUTTER_EXPORT
++ void clutter_stage_view_add_redraw_clip (ClutterStageView   *view,
++                                          const MtkRectangle *clip);
++diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
++index 52d61bd..4902031 100644
++--- a/clutter/clutter/clutter-stage-view.c
+++++ b/clutter/clutter/clutter-stage-view.c
++@@ -93,6 +93,9 @@ typedef struct _ClutterStageViewPrivate
++   gboolean has_accumulated_redraw_clip;
++   MtkRegion *accumulated_redraw_clip;
++
+++  MetaStageViewPresentFunc present_func;
+++  gpointer present_user_data;
+++
++   float refresh_rate;
++   int64_t vblank_duration_us;
++   ClutterFrameClock *frame_clock;
++@@ -1146,6 +1149,51 @@ clutter_stage_view_set_framebuffer (ClutterStageView *view,
++     }
++ }
++
+++void
+++clutter_stage_view_replace_framebuffer (ClutterStageView *view,
+++                                        CoglFramebuffer  *framebuffer)
+++{
+++  ClutterStageViewPrivate *priv =
+++    clutter_stage_view_get_instance_private (view);
+++
+++  g_return_if_fail (framebuffer != NULL);
+++  g_return_if_fail (cogl_framebuffer_get_width (priv->framebuffer) ==
+++                    cogl_framebuffer_get_width (framebuffer));
+++  g_return_if_fail (cogl_framebuffer_get_height (priv->framebuffer) ==
+++                    cogl_framebuffer_get_height (framebuffer));
+++
+++  g_set_object (&priv->framebuffer, framebuffer);
+++  clutter_stage_view_invalidate_viewport (view);
+++  clutter_stage_view_invalidate_projection (view);
+++}
+++
+++void
+++clutter_stage_view_set_present_func (ClutterStageView        *view,
+++                                     MetaStageViewPresentFunc present_func,
+++                                     gpointer                 user_data)
+++{
+++  ClutterStageViewPrivate *priv =
+++    clutter_stage_view_get_instance_private (view);
+++
+++  priv->present_func = present_func;
+++  priv->present_user_data = user_data;
+++}
+++
+++gboolean
+++clutter_stage_view_present (ClutterStageView *view,
+++                            ClutterFrame     *frame,
+++                            int64_t           global_frame_counter)
+++{
+++  ClutterStageViewPrivate *priv =
+++    clutter_stage_view_get_instance_private (view);
+++
+++  if (!priv->present_func)
+++    return FALSE;
+++
+++  return priv->present_func (view, frame, global_frame_counter,
+++                             priv->present_user_data);
+++}
+++
++ static void
++ clutter_stage_view_set_transform (ClutterStageView    *view,
++                                   MtkMonitorTransform  transform)
++diff --git a/config.h.meson b/config.h.meson
++index 5e7e09b..c335e49 100644
++--- a/config.h.meson
+++++ b/config.h.meson
++@@ -37,6 +37,9 @@
++ /* libwacom has get_num_rings() */
++ #mesondefine HAVE_LIBWACOM_GET_NUM_RINGS
++
+++/* Define if the Anland display backend is enabled */
+++#mesondefine HAVE_ANLAND
+++
++ /* Define if you want to enable XWayland support */
++ #mesondefine HAVE_XWAYLAND
++
++diff --git a/meson.build b/meson.build
++index cdd13b6..8bb1f2e 100644
++--- a/meson.build
+++++ b/meson.build
++@@ -254,6 +254,8 @@ if not have_gles2
++ endif
++
++
+++have_anland = get_option('anland').enabled()
+++
++ have_drm_plane_size_hint = cc.has_type('struct drm_plane_size_hint',
++                                         dependencies: libdrm_dep,
++                                         prefix: '#include <drm_mode.h>')
++@@ -274,7 +276,7 @@ if have_startup_notification
++ endif
++
++ have_remote_desktop = get_option('remote_desktop')
++-if have_remote_desktop
+++if have_remote_desktop or have_anland
++   libpipewire_dep = dependency('libpipewire-0.3', version: libpipewire_req)
++ endif
++
++@@ -545,6 +547,7 @@ cdata.set('HAVE_EGL', have_egl)
++ cdata.set('HAVE_GL', have_gl)
++ cdata.set('HAVE_GLES2', have_gles2)
++ cdata.set('HAVE_XWAYLAND', have_xwayland)
+++cdata.set('HAVE_ANLAND', have_anland)
++ cdata.set('HAVE_REMOTE_DESKTOP', have_remote_desktop)
++ cdata.set('HAVE_DEVKIT', have_devkit)
++ cdata.set('HAVE_GNOME_DESKTOP', have_gnome_desktop)
++diff --git a/meson.options b/meson.options
++index 4f8c0c9..46e4ce0 100644
++--- a/meson.options
+++++ b/meson.options
++@@ -34,6 +34,12 @@ option('xwayland',
++   description: 'Enable Xwayland support'
++ )
++
+++option('anland',
+++  type: 'feature',
+++  value: 'disabled',
+++  description: 'Enable the Anland display backend'
+++)
+++
++ option('remote_desktop',
++   type: 'boolean',
++   value: true,
++diff --git a/src/backends/meta-stage-impl.c b/src/backends/meta-stage-impl.c
++index 167a552..6d9eb43 100644
++--- a/src/backends/meta-stage-impl.c
+++++ b/src/backends/meta-stage-impl.c
++@@ -309,6 +309,13 @@ swap_framebuffer (ClutterStageWindow *stage_window,
++     {
++       MetaStageView *view = META_STAGE_VIEW (stage_view);
++
+++      if (clutter_stage_view_present (stage_view, frame,
+++                                      priv->global_frame_counter))
+++        {
+++          priv->global_frame_counter++;
+++          return;
+++        }
+++
++       meta_topic (META_DEBUG_BACKEND,
++                   "fake offscreen swap (framebuffer: %p)",
++                   framebuffer);
++diff --git a/src/backends/native/meta-seat-impl.c b/src/backends/native/meta-seat-impl.c
++index c45173a..a574bc4 100644
++--- a/src/backends/native/meta-seat-impl.c
+++++ b/src/backends/native/meta-seat-impl.c
++@@ -1004,6 +1004,67 @@ meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_impl,
++   queue_event (seat_impl, event);
++ }
++
+++void
+++meta_seat_impl_notify_absolute_relative_motion_in_impl (MetaSeatImpl       *seat_impl,
+++                                                        ClutterInputDevice *input_device,
+++                                                        uint64_t            time_us,
+++                                                        float               x,
+++                                                        float               y,
+++                                                        float               dx,
+++                                                        float               dy,
+++                                                        float               dx_unaccel,
+++                                                        float               dy_unaccel,
+++                                                        double             *axes)
+++{
+++  MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
+++  MetaInputDeviceNative *device_native =
+++    META_INPUT_DEVICE_NATIVE (input_device);
+++  ClutterModifierType modifiers;
+++  ClutterEvent *event;
+++  graphene_point_t coords, new_coords;
+++  float dx_constrained, dy_constrained;
+++
+++  if (clutter_input_device_get_device_type (input_device) == CLUTTER_TABLET_DEVICE)
+++    {
+++      modifiers = device_native->button_state;
+++    }
+++  else
+++    {
+++      modifiers = seat_impl->button_state;
+++    }
+++
+++  meta_seat_impl_get_onscreen_coords_for_source_device (seat_impl,
+++                                                        input_device,
+++                                                        &coords);
+++
+++  new_coords = GRAPHENE_POINT_INIT (x, y);
+++  constrain_coordinates (seat_impl, input_device, time_us, coords, &new_coords);
+++  dx_constrained = new_coords.x - coords.x;
+++  dy_constrained = new_coords.y - coords.y;
+++  update_device_coords_in_impl (seat_impl, input_device, new_coords);
+++
+++  modifiers |= xkb_state_serialize_mods (seat_impl->xkb, XKB_STATE_MODS_EFFECTIVE);
+++
+++  g_signal_emit (seat_impl, signals[POINTER_POSITION_CHANGED_IN_IMPL], 0,
+++                 &priv->pointer_state);
+++
+++  event =
+++    clutter_event_motion_new (CLUTTER_EVENT_FLAG_RELATIVE_MOTION,
+++                              time_us,
+++                              input_device,
+++                              device_native->last_tool,
+++                              modifiers,
+++                              new_coords,
+++                              GRAPHENE_POINT_INIT (dx, dy),
+++                              GRAPHENE_POINT_INIT (dx_unaccel,
+++                                                   dy_unaccel),
+++                              GRAPHENE_POINT_INIT (dx_constrained,
+++                                                   dy_constrained),
+++                              axes);
+++
+++  queue_event (seat_impl, event);
+++}
+++
++ void
++ meta_seat_impl_notify_button_in_impl (MetaSeatImpl       *seat_impl,
++                                       ClutterInputDevice *input_device,
++diff --git a/src/backends/native/meta-seat-impl.h b/src/backends/native/meta-seat-impl.h
++index 8b2eb61..de79a34 100644
++--- a/src/backends/native/meta-seat-impl.h
+++++ b/src/backends/native/meta-seat-impl.h
++@@ -145,6 +145,17 @@ void meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_imp
++                                                     float               y,
++                                                     double             *axes);
++
+++void meta_seat_impl_notify_absolute_relative_motion_in_impl (MetaSeatImpl       *seat_impl,
+++                                                             ClutterInputDevice *input_device,
+++                                                             uint64_t            time_us,
+++                                                             float               x,
+++                                                             float               y,
+++                                                             float               dx,
+++                                                             float               dy,
+++                                                             float               dx_unaccel,
+++                                                             float               dy_unaccel,
+++                                                             double             *axes);
+++
++ void meta_seat_impl_notify_button_in_impl (MetaSeatImpl       *seat_impl,
++                                            ClutterInputDevice *input_device,
++                                            uint64_t            time_us,
++diff --git a/src/backends/native/meta-virtual-input-device-native.c b/src/backends/native/meta-virtual-input-device-native.c
++index 0d6b8f2..0e46565 100644
++--- a/src/backends/native/meta-virtual-input-device-native.c
+++++ b/src/backends/native/meta-virtual-input-device-native.c
++@@ -64,6 +64,15 @@ typedef struct
++   double y;
++ } MetaVirtualEventMotion;
++
+++typedef struct
+++{
+++  uint64_t time_us;
+++  double x;
+++  double y;
+++  double dx;
+++  double dy;
+++} MetaVirtualEventAbsoluteRelativeMotion;
+++
++ typedef struct
++ {
++   uint64_t time_us;
++@@ -96,6 +105,12 @@ typedef struct
++   double y;
++ } MetaVirtualEventTouch;
++
+++typedef struct
+++{
+++  uint64_t time_us;
+++  GArray *events;
+++} MetaVirtualEventTouchBatch;
+++
++ G_DEFINE_TYPE (MetaVirtualInputDeviceNative,
++                meta_virtual_input_device_native,
++                CLUTTER_TYPE_VIRTUAL_INPUT_DEVICE)
++@@ -312,6 +327,57 @@ meta_virtual_input_device_native_notify_absolute_motion (ClutterVirtualInputDevi
++   g_object_unref (task);
++ }
++
+++static gboolean
+++notify_absolute_relative_motion_in_impl (GTask *task)
+++{
+++  MetaVirtualInputDeviceNative *virtual_native =
+++    g_task_get_source_object (task);
+++  MetaSeatNative *seat_native =
+++    meta_virtual_input_device_native_get_seat_native (virtual_native);
+++  MetaVirtualEventAbsoluteRelativeMotion *event = g_task_get_task_data (task);
+++
+++  if (event->time_us == CLUTTER_CURRENT_TIME)
+++    event->time_us = g_get_monotonic_time ();
+++
+++  meta_seat_impl_notify_absolute_relative_motion_in_impl (
+++    seat_native->impl, virtual_native->impl_state->device, event->time_us,
+++    (float) event->x, (float) event->y, (float) event->dx, (float) event->dy,
+++    (float) event->dx, (float) event->dy, NULL);
+++  g_task_return_boolean (task, TRUE);
+++  return G_SOURCE_REMOVE;
+++}
+++
+++void
+++meta_virtual_input_device_native_notify_absolute_relative_motion (
+++  MetaVirtualInputDeviceNative *virtual_native,
+++  uint64_t                      time_us,
+++  double                        x,
+++  double                        y,
+++  double                        dx,
+++  double                        dy)
+++{
+++  MetaSeatNative *seat_native;
+++  MetaVirtualEventAbsoluteRelativeMotion *event;
+++  GTask *task;
+++
+++  g_return_if_fail (META_IS_VIRTUAL_INPUT_DEVICE_NATIVE (virtual_native));
+++  g_return_if_fail (virtual_native->impl_state != NULL);
+++
+++  seat_native = meta_virtual_input_device_native_get_seat_native (virtual_native);
+++  event = g_new0 (MetaVirtualEventAbsoluteRelativeMotion, 1);
+++  event->time_us = time_us;
+++  event->x = x;
+++  event->y = y;
+++  event->dx = dx;
+++  event->dy = dy;
+++
+++  task = g_task_new (virtual_native, NULL, NULL, NULL);
+++  g_task_set_task_data (task, event, g_free);
+++  meta_seat_impl_run_input_task (seat_native->impl, task,
+++                                 (GSourceFunc) notify_absolute_relative_motion_in_impl);
+++  g_object_unref (task);
+++}
+++
++ static gboolean
++ notify_button_in_impl (GTask *task)
++ {
++@@ -971,6 +1037,98 @@ meta_virtual_input_device_native_notify_touch_up (ClutterVirtualInputDevice *vir
++   g_object_unref (task);
++ }
++
+++static gboolean
+++notify_touch_events_in_impl (GTask *task)
+++{
+++  MetaVirtualInputDeviceNative *virtual_native =
+++    g_task_get_source_object (task);
+++  MetaSeatNative *seat_native =
+++    meta_virtual_input_device_native_get_seat_native (virtual_native);
+++  MetaSeatImpl *seat = seat_native->impl;
+++  MetaVirtualEventTouchBatch *batch = g_task_get_task_data (task);
+++  GArray *events = batch->events;
+++  uint64_t time_us = batch->time_us;
+++  guint i;
+++
+++  for (i = 0; i < events->len; i++)
+++    {
+++      const MetaVirtualTouchEvent *event =
+++        &g_array_index (events, MetaVirtualTouchEvent, i);
+++      int device_slot = virtual_native->slot_base + event->slot;
+++
+++      switch (event->type)
+++        {
+++        case META_VIRTUAL_TOUCH_EVENT_DOWN:
+++          meta_seat_impl_notify_touch_event_in_impl (
+++            seat, virtual_native->impl_state->device, CLUTTER_TOUCH_BEGIN,
+++            time_us, device_slot, (float) event->x, (float) event->y);
+++          break;
+++        case META_VIRTUAL_TOUCH_EVENT_MOTION:
+++          meta_seat_impl_notify_touch_event_in_impl (
+++            seat, virtual_native->impl_state->device, CLUTTER_TOUCH_UPDATE,
+++            time_us, device_slot, (float) event->x, (float) event->y);
+++          break;
+++        case META_VIRTUAL_TOUCH_EVENT_UP:
+++        case META_VIRTUAL_TOUCH_EVENT_CANCEL:
+++          meta_seat_impl_notify_touch_event_in_impl (
+++            seat, virtual_native->impl_state->device,
+++            event->type == META_VIRTUAL_TOUCH_EVENT_UP ? CLUTTER_TOUCH_END :
+++                                                         CLUTTER_TOUCH_CANCEL,
+++            time_us, device_slot, (float) event->x, (float) event->y);
+++          break;
+++        }
+++    }
+++
+++  g_task_return_boolean (task, TRUE);
+++  return G_SOURCE_REMOVE;
+++}
+++
+++static void
+++meta_virtual_event_touch_batch_free (MetaVirtualEventTouchBatch *batch)
+++{
+++  g_clear_pointer (&batch->events, g_array_unref);
+++  g_free (batch);
+++}
+++
+++void
+++meta_virtual_input_device_native_notify_touch_events (
+++  MetaVirtualInputDeviceNative *virtual_native,
+++  uint64_t                      time_us,
+++  const MetaVirtualTouchEvent  *events,
+++  gsize                         n_events)
+++{
+++  MetaSeatNative *seat_native;
+++  MetaVirtualEventTouchBatch *batch;
+++  GArray *copied_events;
+++  GTask *task;
+++  gsize i;
+++
+++  g_return_if_fail (META_IS_VIRTUAL_INPUT_DEVICE_NATIVE (virtual_native));
+++  g_return_if_fail (virtual_native->impl_state != NULL);
+++  g_return_if_fail (n_events > 0);
+++  g_return_if_fail (events != NULL);
+++
+++  copied_events = g_array_sized_new (FALSE, FALSE, sizeof (*events), n_events);
+++  for (i = 0; i < n_events; i++)
+++    {
+++      g_return_if_fail (events[i].slot >= 0 &&
+++                        events[i].slot < CLUTTER_VIRTUAL_INPUT_DEVICE_MAX_TOUCH_SLOTS);
+++      g_array_append_val (copied_events, events[i]);
+++    }
+++
+++  seat_native = meta_virtual_input_device_native_get_seat_native (virtual_native);
+++  batch = g_new0 (MetaVirtualEventTouchBatch, 1);
+++  batch->time_us = time_us == CLUTTER_CURRENT_TIME ?
+++    g_get_monotonic_time () : time_us;
+++  batch->events = copied_events;
+++  task = g_task_new (virtual_native, NULL, NULL, NULL);
+++  g_task_set_task_data (task, batch,
+++                        (GDestroyNotify) meta_virtual_event_touch_batch_free);
+++  meta_seat_impl_run_input_task (seat_native->impl, task,
+++                                 (GSourceFunc) notify_touch_events_in_impl);
+++  g_object_unref (task);
+++}
+++
++ static void
++ meta_virtual_input_device_native_get_property (GObject    *object,
++                                                guint       prop_id,
++diff --git a/src/backends/native/meta-virtual-input-device-native.h b/src/backends/native/meta-virtual-input-device-native.h
++index a41b5ed..149c989 100644
++--- a/src/backends/native/meta-virtual-input-device-native.h
+++++ b/src/backends/native/meta-virtual-input-device-native.h
++@@ -19,6 +19,8 @@
++
++ #pragma once
++
+++#include <stdint.h>
+++
++ #include "clutter/clutter-virtual-input-device.h"
++
++ #define META_TYPE_VIRTUAL_INPUT_DEVICE_NATIVE (meta_virtual_input_device_native_get_type ())
++@@ -26,3 +28,33 @@ G_DECLARE_FINAL_TYPE (MetaVirtualInputDeviceNative,
++                       meta_virtual_input_device_native,
++                       META, VIRTUAL_INPUT_DEVICE_NATIVE,
++                       ClutterVirtualInputDevice)
+++
+++typedef enum
+++{
+++  META_VIRTUAL_TOUCH_EVENT_DOWN,
+++  META_VIRTUAL_TOUCH_EVENT_MOTION,
+++  META_VIRTUAL_TOUCH_EVENT_UP,
+++  META_VIRTUAL_TOUCH_EVENT_CANCEL,
+++} MetaVirtualTouchEventType;
+++
+++typedef struct
+++{
+++  MetaVirtualTouchEventType type;
+++  int slot;
+++  double x;
+++  double y;
+++} MetaVirtualTouchEvent;
+++
+++void meta_virtual_input_device_native_notify_absolute_relative_motion (
+++  MetaVirtualInputDeviceNative *virtual_device,
+++  uint64_t                      time_us,
+++  double                        x,
+++  double                        y,
+++  double                        dx,
+++  double                        dy);
+++
+++void meta_virtual_input_device_native_notify_touch_events (
+++  MetaVirtualInputDeviceNative *virtual_device,
+++  uint64_t                      time_us,
+++  const MetaVirtualTouchEvent  *events,
+++  gsize                         n_events);
++diff --git a/src/core/display.c b/src/core/display.c
++index 45b860e..7d6d6fe 100644
++--- a/src/core/display.c
+++++ b/src/core/display.c
++@@ -36,6 +36,9 @@
++
++ #include "backends/meta-backend-private.h"
++ #include "backends/meta-cursor-xcursor.h"
+++#ifdef HAVE_ANLAND
+++#include "backends/anland/meta-backend-anland.h"
+++#endif
++ #include "backends/meta-cursor-tracker-private.h"
++ #include "backends/meta-input-capture.h"
++ #include "backends/meta-input-device-private.h"
++@@ -669,15 +672,29 @@ meta_display_init_x11_finish (MetaDisplay   *display,
++                               GError       **error)
++ {
++   MetaX11Display *x11_display;
+++  gboolean x11_services_started;
++
++   g_assert (g_task_get_source_tag (G_TASK (result)) == meta_display_init_x11);
++
++-  if (!g_task_propagate_boolean (G_TASK (result), error))
+++  x11_services_started = g_task_propagate_boolean (G_TASK (result), error);
+++  if (!x11_services_started)
++     {
++-      if (*error == NULL)
++-        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Unknown error");
+++#ifdef HAVE_ANLAND
+++      MetaContext *context = meta_display_get_context (display);
+++      MetaBackend *backend = meta_context_get_backend (context);
++
++-      return FALSE;
+++      if (*error == NULL && META_IS_BACKEND_ANLAND (backend))
+++        {
+++          g_message ("Continuing without X11 session services on Anland");
+++        }
+++      else
+++#endif
+++        {
+++          if (*error == NULL)
+++            g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Unknown error");
+++
+++          return FALSE;
+++        }
++     }
++
++   if (display->x11_display)
++diff --git a/src/core/meta-context-main.c b/src/core/meta-context-main.c
++index e40394b..bf15690 100644
++--- a/src/core/meta-context-main.c
+++++ b/src/core/meta-context-main.c
++@@ -37,6 +37,10 @@
++ #include "backends/native/meta-backend-native.h"
++ #include "backends/native/meta-backend-native-types.h"
++
+++#ifdef HAVE_ANLAND
+++#include "backends/anland/meta-backend-anland.h"
+++#endif
+++
++ #ifdef HAVE_DEVKIT
++ #include "core/meta-mdk.h"
++ #endif
++@@ -51,6 +55,10 @@ typedef struct _MetaContextMainOptions
++   gboolean devkit;
++   char *devkit_args;
++   GList *virtual_monitor_infos;
+++#ifdef HAVE_ANLAND
+++  gboolean anland;
+++  char *anland_socket;
+++#endif
++   char *trace_file;
++   gboolean debug_control;
++   gboolean unsafe_mode;
++@@ -85,6 +93,29 @@ check_configuration (MetaContextMain  *context_main,
++       return FALSE;
++     }
++
+++#ifdef HAVE_ANLAND
+++  if (context_main->options.anland_socket &&
+++      !context_main->options.anland)
+++    {
+++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+++                   "--anland-socket requires --anland");
+++      return FALSE;
+++    }
+++
+++  if (context_main->options.anland &&
+++      (context_main->options.display_server ||
+++       context_main->options.headless
+++#ifdef HAVE_DEVKIT
+++       || context_main->options.devkit
+++#endif
+++      ))
+++    {
+++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+++                   "Can't run Anland with display server or headless mode");
+++      return FALSE;
+++    }
+++#endif /* HAVE_ANLAND */
+++
++   return TRUE;
++ }
++
++@@ -98,11 +129,19 @@ meta_context_main_configure (MetaContext   *context,
++   MetaContextClass *context_class =
++     META_CONTEXT_CLASS (meta_context_main_parent_class);
++   g_autofree char *wayland_display = NULL;
+++#ifdef HAVE_ANLAND
+++  const char *anland_socket;
+++#endif
++
++   if (!context_class->configure (context, argc, argv, error))
++     return FALSE;
++
++   wayland_display = g_steal_pointer (&context_main->options.wayland_display);
+++#ifdef HAVE_ANLAND
+++  anland_socket = g_getenv ("ANLAND_SOCKET");
+++  if (anland_socket && *anland_socket)
+++    context_main->options.anland = TRUE;
+++#endif
++
++   if (!check_configuration (context_main, error))
++     return FALSE;
++@@ -234,6 +273,13 @@ meta_context_main_setup (MetaContext  *context,
++     }
++ #endif
++
+++#ifdef HAVE_ANLAND
+++  if (context_main->options.anland &&
+++      !meta_backend_anland_setup (
+++        META_BACKEND_ANLAND (meta_context_get_backend (context)), error))
+++    return FALSE;
+++#endif
+++
++   return TRUE;
++ }
++
++@@ -248,6 +294,31 @@ create_headless_backend (MetaContext  *context,
++                          NULL);
++ }
++
+++#ifdef HAVE_ANLAND
+++static MetaBackend *
+++create_anland_backend (MetaContext  *context,
+++                       GError      **error)
+++{
+++  MetaContextMain *context_main = META_CONTEXT_MAIN (context);
+++
+++  if (context_main->options.anland_socket)
+++    {
+++      return g_initable_new (META_TYPE_BACKEND_ANLAND,
+++                             NULL, error,
+++                             "context", context,
+++                             "mode", META_BACKEND_NATIVE_MODE_HEADLESS,
+++                             "anland-socket", context_main->options.anland_socket,
+++                             NULL);
+++    }
+++
+++  return g_initable_new (META_TYPE_BACKEND_ANLAND,
+++                         NULL, error,
+++                         "context", context,
+++                         "mode", META_BACKEND_NATIVE_MODE_HEADLESS,
+++                         NULL);
+++}
+++#endif
+++
++ static MetaBackend *
++ create_native_backend (MetaContext  *context,
++                        GError      **error)
++@@ -264,6 +335,10 @@ meta_context_main_create_backend (MetaContext  *context,
++ {
++   MetaContextMain *context_main = META_CONTEXT_MAIN (context);
++
+++#ifdef HAVE_ANLAND
+++  if (context_main->options.anland)
+++    return create_anland_backend (context, error);
+++#endif
++   if (context_main->options.headless ||
++       context_main->options.devkit)
++     return create_headless_backend (context, error);
++@@ -368,6 +443,19 @@ meta_context_main_add_option_entries (MetaContextMain *context_main)
++       &context_main->options.headless,
++       N_("Run as a headless display server")
++     },
+++#ifdef HAVE_ANLAND
+++    {
+++      "anland", 0, 0, G_OPTION_ARG_NONE,
+++      &context_main->options.anland,
+++      N_("Run with the Anland display backend")
+++    },
+++    {
+++      "anland-socket", 0, 0, G_OPTION_ARG_FILENAME,
+++      &context_main->options.anland_socket,
+++      N_("Specify Anland display daemon socket"),
+++      "PATH"
+++    },
+++#endif
++     {
++       "virtual-monitor", 0, 0, G_OPTION_ARG_CALLBACK,
++       add_virtual_monitor_cb,
++@@ -428,6 +516,7 @@ meta_context_main_finalize (GObject *object)
++ {
++   MetaContextMain *context_main = META_CONTEXT_MAIN (object);
++
+++  g_clear_pointer (&context_main->options.anland_socket, g_free);
++   g_list_free_full (context_main->persistent_virtual_monitors, g_object_unref);
++   context_main->persistent_virtual_monitors = NULL;
++
++diff --git a/src/meson.build b/src/meson.build
++index 60970ce..a1c951e 100644
++--- a/src/meson.build
+++++ b/src/meson.build
++@@ -78,9 +78,14 @@ if have_libwacom
++   ]
++ endif
++
++-if have_remote_desktop
+++if have_remote_desktop or have_anland
++   mutter_pkg_private_deps += [
++     libpipewire_dep,
+++  ]
+++endif
+++
+++if have_remote_desktop
+++  mutter_pkg_private_deps += [
++     libeis_dep,
++   ]
++ endif
++@@ -790,6 +795,12 @@ mutter_sources += [
++   'compositor/meta-compositor-view-native.h',
++ ]
++
+++if have_anland
+++  # The backend source list lives in the shared backend directory so every
+++  # distribution overlay consumes one list instead of keeping its own copy.
+++  subdir('backends/anland')
+++endif
+++
++ if have_devkit
++   mutter_sources += [
++     'core/meta-mdk.c',
++diff --git a/src/wayland/meta-wayland-text-input.c b/src/wayland/meta-wayland-text-input.c
++index ef1866a..119cdec 100644
++--- a/src/wayland/meta-wayland-text-input.c
+++++ b/src/wayland/meta-wayland-text-input.c
++@@ -23,6 +23,7 @@
++
++ #include <wayland-server.h>
++
+++#include "clutter/clutter/clutter-input-focus.h"
++ #include "compositor/meta-surface-actor-wayland.h"
++ #include "mtk/mtk.h"
++ #include "wayland/meta-wayland-private.h"
++@@ -1075,6 +1076,22 @@ meta_wayland_text_input_destroy (MetaWaylandTextInput *text_input)
++   g_free (text_input);
++ }
++
+++gboolean
+++meta_wayland_text_input_commit_string (MetaWaylandTextInput *text_input,
+++                                       const char           *text)
+++{
+++  if (!text_input || !text || !*text || !text_input->enabled ||
+++      !text_input->surface ||
+++      wl_list_empty (&text_input->focus_resource_list) ||
+++      !clutter_input_focus_is_focused (text_input->input_focus))
+++    return FALSE;
+++
+++  CLUTTER_INPUT_FOCUS_GET_CLASS (text_input->input_focus)->commit_text (
+++    text_input->input_focus, text);
+++  meta_wayland_text_input_focus_flush_done (text_input->input_focus);
+++  return TRUE;
+++}
+++
++ static void
++ meta_wayland_text_input_create_new_resource (MetaWaylandTextInput *text_input,
++                                              struct wl_client     *client,
++diff --git a/src/wayland/meta-wayland-text-input.h b/src/wayland/meta-wayland-text-input.h
++index 458614c..c28d0a0 100644
++--- a/src/wayland/meta-wayland-text-input.h
+++++ b/src/wayland/meta-wayland-text-input.h
++@@ -43,3 +43,6 @@ gboolean meta_wayland_text_input_update (MetaWaylandTextInput *text_input,
++
++ gboolean meta_wayland_text_input_handle_event (MetaWaylandTextInput *text_input,
++                                                const ClutterEvent   *event);
+++
+++gboolean meta_wayland_text_input_commit_string (MetaWaylandTextInput *text_input,
+++                                                const char           *text);
++diff --git a/src/wayland/meta-wayland.c b/src/wayland/meta-wayland.c
++index c2f2484..a878e6b 100644
++--- a/src/wayland/meta-wayland.c
+++++ b/src/wayland/meta-wayland.c
++@@ -740,11 +740,13 @@ set_gnome_env (const char *name,
++       g_autofree char *remote_error = NULL;
++
++       remote_error = g_dbus_error_get_remote_error (error);
++-      if (g_strcmp0 (remote_error, "org.freedesktop.DBus.Error.NameHasNoOwner") == 0)
+++      if (g_strcmp0 (remote_error, "org.freedesktop.DBus.Error.NameHasNoOwner") == 0 ||
+++          g_strcmp0 (remote_error,
+++                     "org.gnome.SessionManager.NotInInitialization") == 0)
++         {
++           return update_activation_environment (session_bus, name, value);
++         }
++-      else if (g_strcmp0 (remote_error, "org.gnome.SessionManager.NotInInitialization") != 0)
+++      else
++         {
++           g_warning ("Failed to set environment variable %s for gnome-session: %s",
++                      name, error->message);
++diff --git a/src/wayland/meta-xwayland.c b/src/wayland/meta-xwayland.c
++index 4b99bab..a82e932 100644
++--- a/src/wayland/meta-xwayland.c
+++++ b/src/wayland/meta-xwayland.c
++@@ -47,6 +47,9 @@
++
++ #include "backends/meta-monitor-manager-private.h"
++ #include "backends/meta-settings-private.h"
+++#ifdef HAVE_ANLAND
+++#include "backends/anland/meta-backend-anland.h"
+++#endif
++ #include "meta/main.h"
++ #include "meta/meta-backend.h"
++ #include "mtk/mtk-x11.h"
++@@ -512,7 +515,8 @@ meta_xwayland_override_display_number (int number)
++ }
++
++ static gboolean
++-ensure_x11_unix_perms (GError **error)
+++ensure_x11_unix_perms (GError  **error,
+++                       gboolean  allow_untrusted_owner)
++ {
++   /* Try to detect systems on which /tmp/.X11-unix is owned by neither root nor
++    * ourselves because in that case the owner can take over the socket we create
++@@ -544,7 +548,8 @@ ensure_x11_unix_perms (GError **error)
++   /* If the directory already exists, it should belong to the same
++    * user as /tmp or belong to ourselves ...
++    * (if /tmp is not owned by root or ourselves we're in deep trouble) */
++-  if (x11_tmp.st_uid != tmp.st_uid && x11_tmp.st_uid != getuid ())
+++  if (!allow_untrusted_owner &&
+++      x11_tmp.st_uid != tmp.st_uid && x11_tmp.st_uid != getuid ())
++     {
++       g_set_error (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
++                    "Wrong ownership for directory \"%s\", owned by %d but "
++@@ -576,12 +581,13 @@ ensure_x11_unix_perms (GError **error)
++ }
++
++ static gboolean
++-ensure_x11_unix_dir (GError **error)
+++ensure_x11_unix_dir (GError  **error,
+++                     gboolean  allow_untrusted_owner)
++ {
++   if (mkdir (X11_TMP_UNIX_DIR, 01777) != 0)
++     {
++       if (errno == EEXIST)
++-        return ensure_x11_unix_perms (error);
+++        return ensure_x11_unix_perms (error, allow_untrusted_owner);
++
++       g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
++                    "Failed to create directory \"%s\": %s",
++@@ -623,12 +629,13 @@ static gboolean
++ choose_xdisplay (MetaXWaylandManager     *manager,
++                  MetaXWaylandConnection  *connection,
++                  int                     *display,
+++                 gboolean                 allow_untrusted_owner,
++                  GError                 **error)
++ {
++   int number_of_tries = 0;
++   char *lock_file = NULL;
++
++-  if (!ensure_x11_unix_dir (error))
+++  if (!ensure_x11_unix_dir (error, allow_untrusted_owner))
++     return FALSE;
++
++   do
++@@ -763,12 +770,15 @@ on_displayfd_ready (int          fd,
++                     gpointer     user_data)
++ {
++   GTask *task = user_data;
+++  char display_name[16];
+++  ssize_t bytes_read;
++
++   /* The server writes its display name to the displayfd
++-   * socket when it's ready. We don't care about the data
++-   * in the socket, just that it wrote something, since
++-   * that means it's ready. */
++-  g_task_return_boolean (task, !!(condition & G_IO_IN));
+++   * socket when it's ready. PRoot may only report G_IO_HUP
+++   * after Xwayland writes and closes the socket, so check
+++   * the pending data instead of relying on the condition. */
+++  bytes_read = recv (fd, display_name, sizeof (display_name), MSG_DONTWAIT);
+++  g_task_return_boolean (task, bytes_read > 0);
++   g_object_unref (task);
++
++   return G_SOURCE_REMOVE;
++@@ -1111,8 +1121,13 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
++   MetaMonitorManager *monitor_manager =
++     meta_backend_get_monitor_manager (backend);
++   MetaX11DisplayPolicy policy;
+++  gboolean allow_untrusted_owner = FALSE;
++   int display = 0;
++
+++#ifdef HAVE_ANLAND
+++  allow_untrusted_owner = META_IS_BACKEND_ANLAND (backend);
+++#endif
+++
++   if (display_number_override != -1)
++     display = display_number_override;
++   else if (g_getenv ("RUNNING_UNDER_GDM"))
++@@ -1120,13 +1135,15 @@ meta_xwayland_init (MetaXWaylandManager    *manager,
++
++   if (!manager->public_connection.name)
++     {
++-      if (!choose_xdisplay (manager, &manager->public_connection, &display, error))
+++      if (!choose_xdisplay (manager, &manager->public_connection, &display,
+++                            allow_untrusted_owner, error))
++         return FALSE;
++       manager->public_connection.name =
++         g_strdup_printf (":%d", manager->public_connection.display_index);
++
++       display++;
++-      if (!choose_xdisplay (manager, &manager->private_connection, &display, error))
+++      if (!choose_xdisplay (manager, &manager->private_connection, &display,
+++                            allow_untrusted_owner, error))
++         return FALSE;
++       manager->private_connection.name =
++         g_strdup_printf ("unix:%s%d", X11_TMP_UNIX_PATH,
+diff --git a/producers/gnome/Fedora45_v5/mutter.patch b/producers/gnome/Fedora45_v5/mutter.patch
+new file mode 120000
+index 0000000..c6879e7
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/mutter.patch
+@@ -0,0 +1 @@
++mutter-fedora45.patch
+\ No newline at end of file
+diff --git a/producers/gnome/Fedora45_v5/sources.json b/producers/gnome/Fedora45_v5/sources.json
+new file mode 100644
+index 0000000..e4bf660
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/sources.json
+@@ -0,0 +1,8 @@
++{
++  "sources": {
++    "mutter": { "method": "dnf-source" }
++  },
++  "patches": {
++    "mutter.patch": "020e3d5bdef503f7f2b81583576188923dfb03b7a19f35df18e1d439d48b1ae8"
++  }
++}
+diff --git a/producers/gnome/Fedora45_v5/startup.sh b/producers/gnome/Fedora45_v5/startup.sh
+new file mode 100644
+index 0000000..7259b58
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/startup.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Foreground Fedora GNOME session; never adjusts drivers or restarts services.
++set -uo pipefail
++die() { printf 'gnome-anland: %s\n' "$*" >&2; exit 1; }
++case ${1:-} in
++    --help) printf '%s\n' 'gnome-anland [--check] [Anland socket]' 'Uses Fedora GNOME51; caller owns Mesa and session-service configuration.'; exit 0 ;;
++esac
++mode=run
++[[ ${1:-} != --check ]] || { mode=check; shift; }
++[[ $# -le 1 ]] || die 'expected at most one Anland socket'
++export ANLAND=1 ANLAND_SOCKET=${1:-${ANLAND_SOCKET:-/run/display.sock}}
++export ANLAND_DRM_DEVICE=${ANLAND_DRM_DEVICE:-/dev/dri/renderD128}
++export XWAYLAND_GBM_DEVICE=${XWAYLAND_GBM_DEVICE:-$ANLAND_DRM_DEVICE}
++export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
++export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome
++export GNOME_SHELL_SESSION_MODE=gnome
++[[ -d $XDG_RUNTIME_DIR && ! -L $XDG_RUNTIME_DIR && -O $XDG_RUNTIME_DIR && $(stat -c %a "$XDG_RUNTIME_DIR") == 700 ]] || die 'runtime directory must exist, owned, mode 0700'
++[[ -S $ANLAND_SOCKET ]] || die "missing Anland socket: $ANLAND_SOCKET"
++[[ -c $ANLAND_DRM_DEVICE && -r $ANLAND_DRM_DEVICE && -w $ANLAND_DRM_DEVICE ]] || die 'render device inaccessible'
++for tool in gnome-shell gnome-session Xwayland; do command -v "$tool" >/dev/null || die "missing $tool"; done
++if [[ $mode == check ]]; then
++    gnome-shell --help 2>&1 | grep -q -- '--anland' || die 'Mutter lacks Anland support'
++    printf 'GNOME_ANLAND_PREFLIGHT_OK (no consumer handshake or graphical test)\n'; exit 0
++fi
++exec 9>"$XDG_RUNTIME_DIR/anland-producer-session.lock" || die 'session lock'
++flock -n 9 || die 'another producer owns the session'
++for name in gnome-shell mutter kwin_wayland Hyprland mango niri niri-anland deniald gamescope weston; do
++    if pgrep -u "$(id -u)" -x "$name" >/dev/null; then die "existing $name session; refusing takeover"; fi
++done
++unset DISPLAY WAYLAND_DISPLAY
++# GNOME51's session manager may require an existing user systemd manager.
++# A missing manager is not grounds to start/stop one or change the caller's bus.
++exec gnome-session
+\ No newline at end of file
+diff --git a/producers/gnome/Fedora45_v5/xwayland.patch b/producers/gnome/Fedora45_v5/xwayland.patch
+new file mode 120000
+index 0000000..53f1057
+--- /dev/null
++++ b/producers/gnome/Fedora45_v5/xwayland.patch
+@@ -0,0 +1 @@
++../../kde/ubuntu2604_v5/xwayland.patch
+\ No newline at end of file
+-- 
+2.56.1
+
+
+From 6d457c8c534c17af15ca80064f6d10646be973a5 Mon Sep 17 00:00:00 2001
+From: thdbd <thdbd@localhost>
+Date: Sun, 15 Nov 2026 16:30:33 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?fix(gnome):=20Fedora=2045=20=E7=94=A8=20rpm?=
+ =?UTF-8?q?=20-K=20--nosignature=20=E6=A0=A1=E9=AA=8C=E4=BA=A7=E7=89=A9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fedora 45 把 %_pkgverify_level 提到 all，未签名的本地 rpmbuild 产物会被
+rpm -K 判为 SIGNATURES NOT OK 而使构建失败；改为只校验摘要。
+---
+ producers/gnome/Fedora45_v5/build.sh | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/producers/gnome/Fedora45_v5/build.sh b/producers/gnome/Fedora45_v5/build.sh
+index 694a183..6d7252c 100644
+--- a/producers/gnome/Fedora45_v5/build.sh
++++ b/producers/gnome/Fedora45_v5/build.sh
+@@ -94,7 +94,9 @@ fedora_publish_rpm() {
+     local file=$1 destination="$ARTIFACTS_DIR/${1##*/}" architecture
+     architecture=$(rpm -qp --qf '%{ARCH}' "$file") || fedora_die 'RPM architecture'
+     [[ $architecture == aarch64 || $architecture == noarch ]] || fedora_die "wrong architecture: $file"
+-    fedora_run rpm -K "$file"
++    # Fedora 45 的 %_pkgverify_level 为 all，未签名包会让 rpm -K 失败；
++    # 这里只校验摘要，签名由仓库侧负责。
++    fedora_run rpm -K --nosignature "$file"
+     fedora_run rpm -qpl "$file" >/dev/null
+     [[ ! -e $destination.sig && ! -L $destination.sig ]] || cmp -s "$file" "$destination" || fedora_die "existing signature preserved: $destination.sig"
+     fedora_run cp -p -- "$file" "$destination"
+-- 
+2.56.1
+
